@@ -1,4 +1,4 @@
- import os, asyncio
+import os, asyncio
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from urllib.parse import quote_plus
@@ -7,7 +7,12 @@ from collections import defaultdict, deque
 from fastapi import FastAPI
 import httpx
 from bs4 import BeautifulSoup
-from openai import AsyncOpenAI
+
+try:
+    # openai est optionnel; pas d'erreur si pas installé/clé absente
+    from openai import AsyncOpenAI
+except Exception:
+    AsyncOpenAI = None  # type: ignore
 
 app = FastAPI()
 
@@ -24,36 +29,42 @@ HEARTBEAT_SECONDS = int(os.getenv("HEARTBEAT_SECONDS", "1800"))
 OSINT_INTERVAL_SECONDS = int(os.getenv("OSINT_INTERVAL_SECONDS", "21600"))
 RUN_OSINT_ON_BOOT = os.getenv("RUN_OSINT_ON_BOOT", "1") == "1"
 
-# === Conversation (LLM) ===
+# === Choix du "cerveau" de chat ===
+CHAT_PROVIDER = os.getenv("CHAT_PROVIDER", "auto").lower()  # auto|openai|ollama|none
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "").strip()  # optionnel (OpenRouter, etc.)
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")         # utilisé si OpenAI
 TEMP = float(os.getenv("TEMP", "0.3"))
 MEM_SIZE = int(os.getenv("MEM_SIZE", "12"))
 
+# Ollama (distant via URL publique, ex: https://ton-tunnel.trycloudflare.com )
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "").strip()  # ex: https://xxx.trycloudflare.com
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")     # un modèle disponible sur ta machine Ollama
+
 history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MEM_SIZE))
-client: Optional[AsyncOpenAI] = None
-if OPENAI_API_BASE:
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE) if OPENAI_API_KEY else None
-else:
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# Prépare client OpenAI si demandé/disponible
+_openai_client = None
+if (CHAT_PROVIDER in ("auto", "openai")) and OPENAI_API_KEY and AsyncOpenAI:
+    _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE or None)
 
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     "Tu es Lyra: assistante utile, concise, en français, ton naturel. "
-    "Réponds clairement, étape par étape si besoin. Évite les réponses trop longues."
+    "Réponds clairement. Évite les pavés. Si l’info manque, pose une question courte."
 )
 
 def _split_chunks(text: str, size: int = 3800) -> List[str]:
-    return [text[i:i+size] for i in range(0, len(text), size)]
+    return [text[i:i + size] for i in range(0, len(text), size)]
 
-async def ai_chat(chat_id: str, user_text: str) -> str:
-    if not client:
-        return "Mode conversation non configuré (OPENAI_API_KEY manquant sur Render)."
+# === Chat backends ===
+async def chat_openai(chat_id: str, user_text: str) -> str:
+    if not _openai_client:
+        return "Mode OpenAI non configuré (clé manquante)."
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     msgs.extend(list(history[chat_id]))
     msgs.append({"role": "user", "content": user_text})
-    resp = await client.chat.completions.create(
+    resp = await _openai_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=msgs,
         temperature=TEMP,
@@ -61,10 +72,64 @@ async def ai_chat(chat_id: str, user_text: str) -> str:
     reply = (resp.choices[0].message.content or "").strip()
     if not reply:
         reply = "Désolé, je n’ai pas de réponse là tout de suite."
-    # mémorise
     history[chat_id].append({"role": "user", "content": user_text})
     history[chat_id].append({"role": "assistant", "content": reply})
     return reply
+
+async def chat_ollama(chat_id: str, user_text: str) -> str:
+    if not OLLAMA_BASE_URL:
+        return "Mode Ollama non configuré (OLLAMA_BASE_URL manquant)."
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    msgs.extend(list(history[chat_id]))
+    msgs.append({"role": "user", "content": user_text})
+
+    # Appel API Ollama /api/chat (non-stream)
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+    payload = {"model": OLLAMA_MODEL, "messages": msgs, "stream": False, "options": {"temperature": TEMP}}
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(url, json=payload)
+        r.raise_for_status()
+        data = r.json()
+    # Formats possibles: {"message":{"role":"assistant","content":"..."}} ou liste de messages
+    reply = ""
+    if isinstance(data, dict):
+        if "message" in data and isinstance(data["message"], dict):
+            reply = (data["message"].get("content") or "").strip()
+        elif "messages" in data and isinstance(data["messages"], list) and data["messages"]:
+            reply = (data["messages"][-1].get("content") or "").strip()
+    if not reply:
+        reply = "Désolé, je n’ai rien pu générer via Ollama."
+    history[chat_id].append({"role": "user", "content": user_text})
+    history[chat_id].append({"role": "assistant", "content": reply})
+    return reply
+
+def chat_fallback_simple(user_text: str) -> str:
+    t = user_text.lower()
+    if any(w in t for w in ["bonjour", "salut", "coucou", "hello", "bonsoir"]):
+        return "Salut ! Je suis en ligne ✅\nTu peux aussi taper /help."
+    if "merci" in t:
+        return "Avec plaisir !"
+    if any(w in t for w in ["ça va", "ca va", "comment ça va", "comment ca va"]):
+        return "Super et toi ? 🙂"
+    return f"Je n’ai pas de modèle IA configuré pour parler comme ici.\nTu peux quand même utiliser /help, /osint…\n(Ton message: « {user_text} »)"
+
+async def ai_chat(chat_id: str, user_text: str) -> str:
+    # Sélection du provider
+    provider = CHAT_PROVIDER
+    if provider == "auto":
+        if _openai_client:
+            provider = "openai"
+        elif OLLAMA_BASE_URL:
+            provider = "ollama"
+        else:
+            provider = "none"
+
+    if provider == "openai":
+        return await chat_openai(chat_id, user_text)
+    if provider == "ollama":
+        return await chat_ollama(chat_id, user_text)
+    # fallback
+    return chat_fallback_simple(user_text)
 
 # === Utils Telegram ===
 async def send_to(chat_id: str, msg: str):
@@ -99,7 +164,7 @@ async def _search_ahmia(keyword: str, client_http: httpx.AsyncClient, limit: int
     return items
 
 async def run_osint(keywords: List[str], proxies: Optional[str] = None, per_kw_limit: int = 5) -> str:
-    # httpx>=0.28 : utiliser proxy= (singulier) et seulement si défini
+    # httpx>=0.28 : utiliser proxy= (singulier) seulement si défini
     kwargs = dict(follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
     if proxies:
         kwargs["proxy"] = proxies  # ex: socks5://host:port
@@ -138,8 +203,13 @@ async def osint_loop():
         await asyncio.sleep(OSINT_INTERVAL_SECONDS)
 
 # === Webhook Telegram ===
-@app.post(f"/telegram/{WEBHOOK_SECRET}")
-async def telegram_webhook(payload: dict):
+@app.post(f"/telegram/{{secret}}")
+async def telegram_webhook(payload: dict, secret: str):
+    # la route accepte n'importe quel secret; on vérifie avec TELEGRAM_WEBHOOK_SECRET si défini
+    expected = WEBHOOK_SECRET or "dev"
+    if secret != expected:
+        return {"ok": True}
+
     msg = payload.get("message") or payload.get("edited_message") or {}
     chat = msg.get("chat") or {}
     text = (msg.get("text") or "").strip()
@@ -160,6 +230,7 @@ async def telegram_webhook(payload: dict):
             "/ping → pong\n"
             "/osint mot1, mot2 → mini scan Ahmia\n"
             "/reset → oublie la conversation\n"
+            "/mode → indique le provider (openai/ollama/none)\n"
             "Sinon… parle-moi normalement 🙂"
         )
         await send_to(chat_id, help_msg)
@@ -168,6 +239,17 @@ async def telegram_webhook(payload: dict):
     elif t.startswith("/reset"):
         history.pop(chat_id, None)
         await send_to(chat_id, "Mémoire effacée pour ce chat ✔️")
+    elif t.startswith("/mode"):
+        # calcule le provider effectif
+        eff = CHAT_PROVIDER
+        if eff == "auto":
+            if _openai_client:
+                eff = "openai"
+            elif OLLAMA_BASE_URL:
+                eff = "ollama"
+            else:
+                eff = "none"
+        await send_to(chat_id, f"Mode chat: {eff}")
     elif t.startswith("/osint"):
         kws = text.split(" ", 1)[1] if " " in text else ",".join(OSINT_KEYWORDS)
         summary = await run_osint([k.strip() for k in kws.split(",") if k.strip()], proxies=TOR_SOCKS_URL or None)
