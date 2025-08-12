@@ -1,1 +1,4 @@
-httpx
+httpx[socks]
+beautifulsoup4
+fastapi
+uvicorn
