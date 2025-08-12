@@ -54,7 +54,7 @@ async def _search_ahmia(keyword: str, client: httpx.AsyncClient, limit: int = 5)
     return items
 
 async def run_osint(keywords: List[str], proxies: Optional[str] = None, per_kw_limit: int = 5) -> str:
-    # httpx>=0.28: utiliser "proxy=" (singulier). On ne passe le parametre que s'il existe.
+    # httpx>=0.28 : utiliser proxy= (singulier)
     kwargs = dict(follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
     if proxies:
         kwargs["proxy"] = proxies  # ex: "socks5://host:port"
@@ -107,22 +107,32 @@ async def telegram_webhook(payload: dict):
     if not text:
         return {"ok": True}
 
-    if text.lower().startswith("/start") or text.lower().startswith("/help"):
+    t = text.lower()
+
+    if t.startswith("/start") or t.startswith("/help"):
         help_msg = (
             "Bot en ligne.\n"
             "/ping -> pong\n"
             "/osint mot1, mot2 -> scan OSINT\n"
-            "Texte libre -> /help"
+            "Messages normaux: bonjour/merci/etc.\n"
         )
         await send_to(chat_id, help_msg)
-    elif text.lower().startswith("/ping"):
+    elif t.startswith("/ping"):
         await send_to(chat_id, "pong")
-    elif text.lower().startswith("/osint"):
+    elif t.startswith("/osint"):
         kws = text.split(" ", 1)[1] if " " in text else ",".join(OSINT_KEYWORDS)
         summary = await run_osint([k.strip() for k in kws.split(",") if k.strip()], proxies=TOR_SOCKS_URL or None)
         await send_to(chat_id, f"OSINT (on-demand)\n{summary}")
     else:
-        await send_to(chat_id, "Commande inconnue. Essaie /help")
+        # Réponses simples pour messages non-commandes
+        if any(w in t for w in ["bonjour", "salut", "coucou", "hello", "bonsoir"]):
+            await send_to(chat_id, "Salut ! Je suis en ligne ✅\nEssaie /osint mot1, mot2 ou /help.")
+        elif "merci" in t:
+            await send_to(chat_id, "Avec plaisir !")
+        elif any(w in t for w in ["ça va", "ca va", "comment ça va", "comment ca va"]):
+            await send_to(chat_id, "Super et toi ? 🙂")
+        else:
+            await send_to(chat_id, "Je peux t’aider avec /osint mot1, mot2 — ou tape /help pour la liste.")
     return {"ok": True}
 
 # === FastAPI lifecycle ===
@@ -142,4 +152,3 @@ async def on_startup():
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
