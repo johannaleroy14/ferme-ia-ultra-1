@@ -1,11 +1,13 @@
-import os, asyncio
+ import os, asyncio
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from urllib.parse import quote_plus
+from collections import defaultdict, deque
 
 from fastapi import FastAPI
 import httpx
 from bs4 import BeautifulSoup
+from openai import AsyncOpenAI
 
 app = FastAPI()
 
@@ -22,22 +24,65 @@ HEARTBEAT_SECONDS = int(os.getenv("HEARTBEAT_SECONDS", "1800"))
 OSINT_INTERVAL_SECONDS = int(os.getenv("OSINT_INTERVAL_SECONDS", "21600"))
 RUN_OSINT_ON_BOOT = os.getenv("RUN_OSINT_ON_BOOT", "1") == "1"
 
+# === Conversation (LLM) ===
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "").strip()  # optionnel (OpenRouter, etc.)
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+TEMP = float(os.getenv("TEMP", "0.3"))
+MEM_SIZE = int(os.getenv("MEM_SIZE", "12"))
+
+history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MEM_SIZE))
+client: Optional[AsyncOpenAI] = None
+if OPENAI_API_BASE:
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE) if OPENAI_API_KEY else None
+else:
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+SYSTEM_PROMPT = os.getenv(
+    "SYSTEM_PROMPT",
+    "Tu es Lyra: assistante utile, concise, en français, ton naturel. "
+    "Réponds clairement, étape par étape si besoin. Évite les réponses trop longues."
+)
+
+def _split_chunks(text: str, size: int = 3800) -> List[str]:
+    return [text[i:i+size] for i in range(0, len(text), size)]
+
+async def ai_chat(chat_id: str, user_text: str) -> str:
+    if not client:
+        return "Mode conversation non configuré (OPENAI_API_KEY manquant sur Render)."
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    msgs.extend(list(history[chat_id]))
+    msgs.append({"role": "user", "content": user_text})
+    resp = await client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=msgs,
+        temperature=TEMP,
+    )
+    reply = (resp.choices[0].message.content or "").strip()
+    if not reply:
+        reply = "Désolé, je n’ai pas de réponse là tout de suite."
+    # mémorise
+    history[chat_id].append({"role": "user", "content": user_text})
+    history[chat_id].append({"role": "assistant", "content": reply})
+    return reply
+
 # === Utils Telegram ===
 async def send_to(chat_id: str, msg: str):
     if not TOKEN:
         return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     async with httpx.AsyncClient(timeout=15) as c:
-        await c.post(url, data={"chat_id": chat_id, "text": msg})
+        for part in _split_chunks(msg):
+            await c.post(url, data={"chat_id": chat_id, "text": part})
 
 async def send(msg: str):
     if CHAT:
         await send_to(str(CHAT), msg)
 
 # === OSINT (Ahmia, clearnet) ===
-async def _search_ahmia(keyword: str, client: httpx.AsyncClient, limit: int = 5) -> List[Dict]:
+async def _search_ahmia(keyword: str, client_http: httpx.AsyncClient, limit: int = 5) -> List[Dict]:
     url = f"https://ahmia.fi/search/?q={quote_plus(keyword)}"
-    r = await client.get(url, timeout=30)
+    r = await client_http.get(url, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     items: List[Dict] = []
@@ -54,18 +99,18 @@ async def _search_ahmia(keyword: str, client: httpx.AsyncClient, limit: int = 5)
     return items
 
 async def run_osint(keywords: List[str], proxies: Optional[str] = None, per_kw_limit: int = 5) -> str:
-    # httpx>=0.28 : utiliser proxy= (singulier)
+    # httpx>=0.28 : utiliser proxy= (singulier) et seulement si défini
     kwargs = dict(follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
     if proxies:
-        kwargs["proxy"] = proxies  # ex: "socks5://host:port"
+        kwargs["proxy"] = proxies  # ex: socks5://host:port
     out_lines: List[str] = []
-    async with httpx.AsyncClient(**kwargs) as client:
+    async with httpx.AsyncClient(**kwargs) as client_http:
         for kw in keywords:
             try:
                 kw = kw.strip()
                 if not kw:
                     continue
-                results = await _search_ahmia(kw, client, limit=per_kw_limit)
+                results = await _search_ahmia(kw, client_http, limit=per_kw_limit)
                 if not results:
                     out_lines.append(f"[INFO] {kw}: aucun resultat exploitable.")
                 else:
@@ -76,7 +121,7 @@ async def run_osint(keywords: List[str], proxies: Optional[str] = None, per_kw_l
                 out_lines.append(f"[WARN] {kw}: erreur {e!r}")
     return "\n".join(out_lines[:1200]) if out_lines else "Aucun resultat OSINT."
 
-# === Boucles periodiques ===
+# === Boucles périodiques ===
 async def heartbeat_loop():
     while True:
         await asyncio.sleep(HEARTBEAT_SECONDS)
@@ -100,39 +145,39 @@ async def telegram_webhook(payload: dict):
     text = (msg.get("text") or "").strip()
     chat_id = str(chat.get("id") or "")
 
-    # Autorisation: par defaut, ne repond qu'au chat configure
+    # Autorisation: par défaut, ne répond qu'au chat configuré
     if not ALLOW_ALL_CHATS and CHAT and chat_id and chat_id != str(CHAT):
         return {"ok": True}
-
     if not text:
         return {"ok": True}
 
     t = text.lower()
 
+    # commandes
     if t.startswith("/start") or t.startswith("/help"):
         help_msg = (
-            "Bot en ligne.\n"
-            "/ping -> pong\n"
-            "/osint mot1, mot2 -> scan OSINT\n"
-            "Messages normaux: bonjour/merci/etc.\n"
+            "Lyra en ligne 🤖\n"
+            "/ping → pong\n"
+            "/osint mot1, mot2 → mini scan Ahmia\n"
+            "/reset → oublie la conversation\n"
+            "Sinon… parle-moi normalement 🙂"
         )
         await send_to(chat_id, help_msg)
     elif t.startswith("/ping"):
         await send_to(chat_id, "pong")
+    elif t.startswith("/reset"):
+        history.pop(chat_id, None)
+        await send_to(chat_id, "Mémoire effacée pour ce chat ✔️")
     elif t.startswith("/osint"):
         kws = text.split(" ", 1)[1] if " " in text else ",".join(OSINT_KEYWORDS)
         summary = await run_osint([k.strip() for k in kws.split(",") if k.strip()], proxies=TOR_SOCKS_URL or None)
         await send_to(chat_id, f"OSINT (on-demand)\n{summary}")
     else:
-        # Réponses simples pour messages non-commandes
-        if any(w in t for w in ["bonjour", "salut", "coucou", "hello", "bonsoir"]):
-            await send_to(chat_id, "Salut ! Je suis en ligne ✅\nEssaie /osint mot1, mot2 ou /help.")
-        elif "merci" in t:
-            await send_to(chat_id, "Avec plaisir !")
-        elif any(w in t for w in ["ça va", "ca va", "comment ça va", "comment ca va"]):
-            await send_to(chat_id, "Super et toi ? 🙂")
-        else:
-            await send_to(chat_id, "Je peux t’aider avec /osint mot1, mot2 — ou tape /help pour la liste.")
+        # mode conversation
+        reply = await ai_chat(chat_id, text)
+        for part in _split_chunks(reply):
+            await send_to(chat_id, part)
+
     return {"ok": True}
 
 # === FastAPI lifecycle ===
