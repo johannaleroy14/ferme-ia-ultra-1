@@ -24,7 +24,7 @@ RUN_OSINT_ON_BOOT = os.getenv("RUN_OSINT_ON_BOOT", "1") == "1"
 
 # === Utils Telegram ===
 async def send_to(chat_id: str, msg: str):
-    if not TOKEN: 
+    if not TOKEN:
         return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     async with httpx.AsyncClient(timeout=15) as c:
@@ -32,9 +32,9 @@ async def send_to(chat_id: str, msg: str):
 
 async def send(msg: str):
     if CHAT:
-        await send_to(CHAT, msg)
+        await send_to(str(CHAT), msg)
 
-# === OSINT (Ahmia, côté clearnet) ===
+# === OSINT (Ahmia, clearnet) ===
 async def _search_ahmia(keyword: str, client: httpx.AsyncClient, limit: int = 5) -> List[Dict]:
     url = f"https://ahmia.fi/search/?q={quote_plus(keyword)}"
     r = await client.get(url, timeout=30)
@@ -54,9 +54,12 @@ async def _search_ahmia(keyword: str, client: httpx.AsyncClient, limit: int = 5)
     return items
 
 async def run_osint(keywords: List[str], proxies: Optional[str] = None, per_kw_limit: int = 5) -> str:
-    proxy_cfg = proxies if proxies else None
-    async with httpx.AsyncClient(proxies=proxy_cfg, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-        out_lines: List[str] = []
+    # httpx>=0.28: utiliser "proxy=" (singulier). On ne passe le parametre que s'il existe.
+    kwargs = dict(follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+    if proxies:
+        kwargs["proxy"] = proxies  # ex: "socks5://host:port"
+    out_lines: List[str] = []
+    async with httpx.AsyncClient(**kwargs) as client:
         for kw in keywords:
             try:
                 kw = kw.strip()
@@ -71,9 +74,9 @@ async def run_osint(keywords: List[str], proxies: Optional[str] = None, per_kw_l
                         out_lines.append(f"  {i}. {it['title']}")
             except Exception as e:
                 out_lines.append(f"[WARN] {kw}: erreur {e!r}")
-        return "\n".join(out_lines[:1200]) if out_lines else "Aucun resultat OSINT."
+    return "\n".join(out_lines[:1200]) if out_lines else "Aucun resultat OSINT."
 
-# === Boucles périodiques ===
+# === Boucles periodiques ===
 async def heartbeat_loop():
     while True:
         await asyncio.sleep(HEARTBEAT_SECONDS)
@@ -89,7 +92,7 @@ async def osint_loop():
             await send(f"[WARN] OSINT (web): {e!r}")
         await asyncio.sleep(OSINT_INTERVAL_SECONDS)
 
-# === Webhook Telegram (répond aux messages) ===
+# === Webhook Telegram ===
 @app.post(f"/telegram/{WEBHOOK_SECRET}")
 async def telegram_webhook(payload: dict):
     msg = payload.get("message") or payload.get("edited_message") or {}
@@ -97,31 +100,29 @@ async def telegram_webhook(payload: dict):
     text = (msg.get("text") or "").strip()
     chat_id = str(chat.get("id") or "")
 
-    # Autorisation: par défaut, je réponds seulement à CHAT
+    # Autorisation: par defaut, ne repond qu'au chat configure
     if not ALLOW_ALL_CHATS and CHAT and chat_id and chat_id != str(CHAT):
         return {"ok": True}
 
     if not text:
         return {"ok": True}
 
-    # Commandes simples
     if text.lower().startswith("/start") or text.lower().startswith("/help"):
         help_msg = (
-            "👋 Bot en ligne.\n"
-            "/ping → pong\n"
-            "/osint mot1, mot2 → lance un scan OSINT\n"
-            "Texte libre → je réponds avec les commandes."
+            "Bot en ligne.\n"
+            "/ping -> pong\n"
+            "/osint mot1, mot2 -> scan OSINT\n"
+            "Texte libre -> /help"
         )
         await send_to(chat_id, help_msg)
     elif text.lower().startswith("/ping"):
-        await send_to(chat_id, "pong ✅")
+        await send_to(chat_id, "pong")
     elif text.lower().startswith("/osint"):
         kws = text.split(" ", 1)[1] if " " in text else ",".join(OSINT_KEYWORDS)
         summary = await run_osint([k.strip() for k in kws.split(",") if k.strip()], proxies=TOR_SOCKS_URL or None)
-        await send_to(chat_id, f"OSINT (à la demande)\n{summary}")
+        await send_to(chat_id, f"OSINT (on-demand)\n{summary}")
     else:
-        await send_to(chat_id, "Commande inconnue. Essaie /help ✅")
-
+        await send_to(chat_id, "Commande inconnue. Essaie /help")
     return {"ok": True}
 
 # === FastAPI lifecycle ===
@@ -141,3 +142,4 @@ async def on_startup():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
