@@ -1,53 +1,61 @@
-# --- PATCH OLLAMA ---
-import os, httpx  # assure-toi que ces imports existent en haut de app.py
+# app.py
+import os
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from utils_ollama import get_ollama_base, http_client
 
-async def chat_ollama(chat_id: int, user_text: str) -> str:
-    """
-    Appelle d'abord /api/chat. Si Cloudflare renvoie 403, on retombe sur /api/generate.
-    On envoie un User-Agent "navigateur" pour limiter les 403.
-    """
-    base = (os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
-    model = os.environ.get("OLLAMA_MODEL") or "llama3.2:3b"
+app = FastAPI()
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/126.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        # Optionnel mais utile pour certains filtres CF :
-        "Origin": base,
-        "Referer": base + "/",
+@app.get("/health")
+async def health():
+    base = get_ollama_base()
+    async with http_client() as c:
+        r = await c.get(f"{base}/api/tags")
+        r.raise_for_status()
+    return {"status": "ok"}
+
+async def chat_ollama(user_text: str) -> str:
+    base = get_ollama_base()
+    url = f"{base}/api/chat"
+    payload = {
+        "model": os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+        "messages": [{"role": "user", "content": user_text}],
+        "stream": False,
     }
+    print(f"[chat_ollama] POST {url}")  # log utile dans Render
 
-    timeout = httpx.Timeout(60.0)
-
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # 1) tentative via /api/chat (conversationnelle)
+    async with http_client() as c:
         try:
-            payload_chat = {
-                "model": model,
-                "messages": [{"role": "user", "content": user_text}],
-                "stream": False,
-            }
-            r = await client.post(f"{base}/api/chat", headers=headers, json=payload_chat)
-            if r.status_code == 403:
-                # Cloudflare a bloqué: on passe directement au fallback
-                raise RuntimeError("CF 403 on /api/chat")
+            r = await c.post(url, json=payload)
             r.raise_for_status()
             data = r.json()
-            text = (data.get("message") or {}).get("content") or data.get("response")
-            return text or "Désolé, je n’ai rien reçu du modèle."
-        except Exception:
-            # 2) fallback fiable via /api/generate (mono-instruction)
-            payload_gen = {
-                "model": model,
-                "prompt": user_text,
-                "stream": False,
-            }
-            rg = await client.post(f"{base}/api/generate", headers=headers, json=payload_gen)
-            rg.raise_for_status()
-            data = rg.json()
-            return data.get("response") or "Désolé, je n’ai rien reçu du modèle."
+            return ((data.get("message") or {}).get("content")
+                    or data.get("response")
+                    or "(Réponse vide d’Ollama)")
+        except httpx.RequestError as e:
+            print(f"[chat_ollama] RequestError: {e}")
+            raise HTTPException(503, f"Connexion Ollama échouée: {e}") from e
+        except httpx.HTTPStatusError as e:
+            print(f"[chat_ollama] HTTP {e.response.status_code}: {e.response.text}")
+            raise HTTPException(e.response.status_code, f"Ollama HTTP {e.response.status_code}: {e.response.text}") from e
+
+# Ton chemin secret de webhook: /telegram/lyra123
+@app.post("/telegram/lyra123")
+async def telegram_webhook(req: Request):
+    body = await req.json()
+    text = (body.get("message", {}).get("text") or "").strip() or "bonjour"
+    try:
+        reply = await chat_ollama(text)
+    except HTTPException as e:
+        reply = f"(Service temporairement indisponible: {e.detail})"
+    # Répondre à Telegram
+    token = os.environ.get("TELEGRAM_TOKEN", "")
+    chat_id = body.get("message",{}).get("chat",{}).get("id")
+    if token and chat_id:
+        async with http_client() as c:
+            await c.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": reply},
+            )
+    return {"ok": True}
+
