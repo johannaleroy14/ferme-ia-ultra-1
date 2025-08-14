@@ -1,6 +1,6 @@
 import os, json
 from fastapi import FastAPI, Request
-from utils_ollama import get_ollama_base, http_client
+import httpx
 
 app = FastAPI()
 
@@ -8,6 +8,14 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN","").strip().strip("'\"")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 MODEL = os.getenv("OLLAMA_MODEL","llama3.2:3b")
 MAX_TG = 3900
+
+def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
+    transport = httpx.AsyncHTTPTransport(retries=1)
+    return httpx.AsyncClient(http2=False, transport=transport, timeout=timeout, headers={
+        "Connection": "keep-alive",
+        "ngrok-skip-browser-warning": "true",
+        "Accept": "application/json",
+    })
 
 @app.get("/health")
 def health():
@@ -34,7 +42,7 @@ async def diag():
 
 async def chat_ollama(user_text: str) -> tuple[str, dict]:
     meta = {"status": None, "error": None, "snippet": None}
-    base = get_ollama_base()
+    base = (os.getenv("OLLAMA_BASE_URL") or "").strip().rstrip("/")
     url = f"{base}/api/chat"
     payload = {"model": MODEL, "messages": [{"role":"user","content":user_text}], "stream": False}
     print(f"[chat_ollama] POST {url}")
