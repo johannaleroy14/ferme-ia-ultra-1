@@ -9,7 +9,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 MODEL = os.getenv("OLLAMA_MODEL","llama3.2:3b")
 MAX_TG = 3900
 
-# ⚠️ Fallback si l'ENV n'est pas lue côté Render
+# Fallback si l'ENV n'est pas lue côté Render
 BASE = (os.getenv("OLLAMA_BASE_URL") or "https://inputs-trail-coupled-specials.trycloudflare.com").strip().rstrip("/")
 
 def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
@@ -25,10 +25,6 @@ def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
         },
     )
 
-@app.get("/")
-def root():
-    return {"ok": True, "app": "alive"}
-
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -38,6 +34,7 @@ def show_env():
     return {
         "OLLAMA_BASE_URL_env": (os.getenv("OLLAMA_BASE_URL") or "").strip(),
         "BASE_used": BASE,
+        "TELEGRAM_TOKEN_set": bool(TELEGRAM_TOKEN),
     }
 
 @app.get("/diag")
