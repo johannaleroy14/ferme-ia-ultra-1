@@ -4,12 +4,13 @@ import httpx
 
 app = FastAPI()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN","").strip().strip("'\"")
+# lit TELEGRAM_TOKEN ou TELEGRAM_BOT_TOKEN
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip().strip("'\"")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 MODEL = os.getenv("OLLAMA_MODEL","llama3.2:3b")
 MAX_TG = 3900
 
-# Fallback si l'ENV n'est pas lue côté Render
+# Fallback Cloudflare si OLLAMA_BASE_URL absent
 BASE = (os.getenv("OLLAMA_BASE_URL") or "https://inputs-trail-coupled-specials.trycloudflare.com").strip().rstrip("/")
 
 def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
@@ -35,6 +36,10 @@ def show_env():
         "OLLAMA_BASE_URL_env": (os.getenv("OLLAMA_BASE_URL") or "").strip(),
         "BASE_used": BASE,
         "TELEGRAM_TOKEN_set": bool(TELEGRAM_TOKEN),
+        "TELEGRAM_TOKEN_source": (
+            "TELEGRAM_TOKEN" if os.getenv("TELEGRAM_TOKEN")
+            else ("TELEGRAM_BOT_TOKEN" if os.getenv("TELEGRAM_BOT_TOKEN") else "")
+        ),
     }
 
 @app.get("/diag")
@@ -94,6 +99,7 @@ async def send_telegram(chat_id: int, text: str) -> None:
     except Exception as e:
         print(f"[telegram] ERROR sendMessage: {repr(e)}")
 
+from fastapi import Request
 @app.post("/telegram/lyra123")
 async def telegram_webhook(req: Request):
     upd = await req.json()
