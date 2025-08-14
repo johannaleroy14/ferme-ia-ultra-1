@@ -13,7 +13,15 @@ MAX_TG = 3900
 # Fallback Cloudflare si OLLAMA_BASE_URL absent
 BASE = (os.getenv("OLLAMA_BASE_URL") or "https://inputs-trail-coupled-specials.trycloudflare.com").strip().rstrip("/")
 
-def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
+def http_client(timeout: float = 45.0) -> httpx.AsyncClient:
+    # timeouts fins + quelques retries
+    tout = httpx.Timeout(connect=5.0, read=40.0, write=40.0, pool=60.0)
+    transport = httpx.AsyncHTTPTransport(retries=2)
+    return httpx.AsyncClient(http2=False, transport=transport, timeout=tout, headers={
+        "Connection": "keep-alive",
+        "ngrok-skip-browser-warning": "true",
+        "Accept": "application/json",
+    })
     transport = httpx.AsyncHTTPTransport(retries=1)
     return httpx.AsyncClient(
         http2=False,
