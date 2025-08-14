@@ -17,8 +17,7 @@ UNLIMITED_DEFAULT = (os.getenv("TELEGRAM_UNLIMITED_DEFAULT","1").strip() not in 
 AGENTS: Dict[str,str] = {
     "lyra": (
         "Tu es Lyra, cheffe d'exploitation agricole. Tu gères la planification "
-        "des tâches, l'allocation des ressources, la météo et les priorités. "
-        "Réponds en français, concret, étapes actionnables."
+        "des tâches, l'allocation des ressources, la météo et les priori        "des tâches, l'allocation des ressources, tapes actionnables."
     ),
     "sante": (
         "Tu es conseillère santé animale (ruminants, volailles). Propose des "
