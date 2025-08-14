@@ -26,3 +26,9 @@ async def diag():
         return {"ok": True, "status": r.status_code, "snippet": snippet}
     except Exception as e:
         return {"ok": False, "err": repr(e), "url": url}
+
+# --- DEBUG: voir l'ENV sur Render ---
+import os
+@app.get("/env")
+def show_env():
+    return {"OLLAMA_BASE_URL": (os.getenv("OLLAMA_BASE_URL") or "").strip()}
