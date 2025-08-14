@@ -9,6 +9,9 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 MODEL = os.getenv("OLLAMA_MODEL","llama3.2:3b")
 MAX_TG = 3900
 
+# Fallback si l'ENV n'est pas lue côté Render
+BASE = (os.getenv("OLLAMA_BASE_URL") or "https://weak-or-incidents-loads.trycloudflare.com").strip().rstrip("/")
+
 def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
     transport = httpx.AsyncHTTPTransport(retries=1)
     return httpx.AsyncClient(http2=False, transport=transport, timeout=timeout, headers={
@@ -23,26 +26,29 @@ def health():
 
 @app.get("/env")
 def show_env():
-    return {"OLLAMA_BASE_URL": (os.getenv("OLLAMA_BASE_URL") or "").strip()}
+    return {
+        "OLLAMA_BASE_URL_env": (os.getenv("OLLAMA_BASE_URL") or "").strip(),
+        "BASE_used": BASE
+    }
 
 @app.get("/diag")
 async def diag():
-    base = (os.getenv("OLLAMA_BASE_URL") or "").strip().rstrip("/")
+    base = BASE
     if not base:
-        return {"ok": False, "err": "missing OLLAMA_BASE_URL"}
+        return {"ok": False, "err": "missing BASE"}
     url = f"{base}/api/tags"
     try:
         async with http_client(timeout=8.0) as c:
             r = await c.get(url)
             raw = await r.aread()
         snippet = raw[:200].decode("utf-8","ignore") if isinstance(raw,(bytes,bytearray)) else str(raw)[:200]
-        return {"ok": True, "status": r.status_code, "snippet": snippet}
+        return {"ok": True, "status": r.status_code, "snippet": snippet, "url": url}
     except Exception as e:
         return {"ok": False, "err": repr(e), "url": url}
 
 async def chat_ollama(user_text: str) -> tuple[str, dict]:
     meta = {"status": None, "error": None, "snippet": None}
-    base = (os.getenv("OLLAMA_BASE_URL") or "").strip().rstrip("/")
+    base = BASE
     url = f"{base}/api/chat"
     payload = {"model": MODEL, "messages": [{"role":"user","content":user_text}], "stream": False}
     print(f"[chat_ollama] POST {url}")
@@ -102,8 +108,3 @@ async def telegram_webhook(req: Request):
 
     await send_telegram(chat_id, reply_text)
     return {"ok": True}
-
-@app.get("/env")
-def env():
-    import os
-    return {"OLLAMA_BASE_URL": (os.getenv("OLLAMA_BASE_URL") or "").strip()}
