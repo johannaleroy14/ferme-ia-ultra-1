@@ -9,16 +9,25 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 MODEL = os.getenv("OLLAMA_MODEL","llama3.2:3b")
 MAX_TG = 3900
 
-# Fallback si l'ENV n'est pas lue côté Render
+# ⚠️ Fallback si l'ENV n'est pas lue côté Render
 BASE = (os.getenv("OLLAMA_BASE_URL") or "https://weak-or-incidents-loads.trycloudflare.com").strip().rstrip("/")
 
 def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
     transport = httpx.AsyncHTTPTransport(retries=1)
-    return httpx.AsyncClient(http2=False, transport=transport, timeout=timeout, headers={
-        "Connection": "keep-alive",
-        "ngrok-skip-browser-warning": "true",
-        "Accept": "application/json",
-    })
+    return httpx.AsyncClient(
+        http2=False,
+        transport=transport,
+        timeout=timeout,
+        headers={
+            "Connection": "keep-alive",
+            "ngrok-skip-browser-warning": "true",
+            "Accept": "application/json",
+        },
+    )
+
+@app.get("/")
+def root():
+    return {"ok": True, "app": "alive"}
 
 @app.get("/health")
 def health():
@@ -28,7 +37,7 @@ def health():
 def show_env():
     return {
         "OLLAMA_BASE_URL_env": (os.getenv("OLLAMA_BASE_URL") or "").strip(),
-        "BASE_used": BASE
+        "BASE_used": BASE,
     }
 
 @app.get("/diag")
