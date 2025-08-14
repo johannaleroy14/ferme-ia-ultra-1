@@ -102,3 +102,8 @@ async def telegram_webhook(req: Request):
 
     await send_telegram(chat_id, reply_text)
     return {"ok": True}
+
+@app.get("/env")
+def env():
+    import os
+    return {"OLLAMA_BASE_URL": (os.getenv("OLLAMA_BASE_URL") or "").strip()}
