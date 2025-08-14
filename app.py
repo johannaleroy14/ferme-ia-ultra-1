@@ -10,7 +10,7 @@ MODEL = os.getenv("OLLAMA_MODEL","llama3.2:3b")
 MAX_TG = 3900
 
 # ⚠️ Fallback si l'ENV n'est pas lue côté Render
-BASE = (os.getenv("OLLAMA_BASE_URL") or "https://weak-or-incidents-loads.trycloudflare.com").strip().rstrip("/")
+BASE = (os.getenv("OLLAMA_BASE_URL") or "https://inputs-trail-coupled-specials.trycloudflare.com").strip().rstrip("/")
 
 def http_client(timeout: float = 12.0) -> httpx.AsyncClient:
     transport = httpx.AsyncHTTPTransport(retries=1)
